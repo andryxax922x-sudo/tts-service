@@ -6,21 +6,24 @@ import os
 
 app = Flask(__name__)
 
+def generate_audio(text, voice):
+    async def run():
+        communicate = edge_tts.Communicate(text, voice)
+        audio_buffer = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk['type'] == 'audio':
+                audio_buffer.write(chunk['data'])
+        audio_buffer.seek(0)
+        return audio_buffer
+    return asyncio.run(run())
+
 @app.route('/tts', methods=['POST'])
-async def tts():
+def tts():
     data = request.json
     text = data.get('text', '')
     voice = data.get('voice', 'ru-RU-SvetlanaNeural')
-    
-    communicate = edge_tts.Communicate(text, voice)
-    audio_buffer = io.BytesIO()
-    
-    async for chunk in communicate.stream():
-        if chunk['type'] == 'audio':
-            audio_buffer.write(chunk['data'])
-    
-    audio_buffer.seek(0)
-    return send_file(audio_buffer, mimetype='audio/mpeg', 
+    audio_buffer = generate_audio(text, voice)
+    return send_file(audio_buffer, mimetype='audio/mpeg',
                      as_attachment=True, download_name='voice.mp3')
 
 @app.route('/health', methods=['GET'])
