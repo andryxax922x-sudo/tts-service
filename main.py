@@ -1,28 +1,38 @@
 from flask import Flask, request, jsonify, send_file
-import edge_tts
-import asyncio
+import requests
 import io
 import os
 
 app = Flask(__name__)
 
-def generate_audio(text, voice):
-    async def run():
-        communicate = edge_tts.Communicate(text, voice)
-        audio_buffer = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk['type'] == 'audio':
-                audio_buffer.write(chunk['data'])
-        audio_buffer.seek(0)
-        return audio_buffer
-    return asyncio.run(run())
+ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')
+VOICE_ID = 'pNInz6obpgDQGcFmaJgB'
 
 @app.route('/tts', methods=['POST'])
 def tts():
     data = request.json
     text = data.get('text', '')
-    voice = data.get('voice', 'ru-RU-SvetlanaNeural')
-    audio_buffer = generate_audio(text, voice)
+    
+    response = requests.post(
+        f'https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}',
+        headers={
+            'xi-api-key': ELEVENLABS_API_KEY,
+            'Content-Type': 'application/json'
+        },
+        json={
+            'text': text,
+            'model_id': 'eleven_multilingual_v2',
+            'voice_settings': {
+                'stability': 0.5,
+                'similarity_boost': 0.75,
+                'style': 0.4,
+                'use_speaker_boost': True
+            }
+        }
+    )
+    
+    audio_buffer = io.BytesIO(response.content)
+    audio_buffer.seek(0)
     return send_file(audio_buffer, mimetype='audio/mpeg',
                      as_attachment=True, download_name='voice.mp3')
 
