@@ -5,11 +5,11 @@ import os
 
 app = Flask(__name__)
 
-ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 
 VOICES = {
-    'ru': 'm0OQuJtWCw1V23P0pQmG',
-    'uk': 'l0FRhtyn0AKRYadUAdgv'
+    'ru': 'nova',
+    'uk': 'shimmer'
 }
 
 @app.route('/tts', methods=['POST'])
@@ -17,23 +17,19 @@ def tts():
     data = request.json
     text = data.get('text', '')
     lang = data.get('lang', 'ru')
-    voice_id = VOICES.get(lang, VOICES['ru'])
+    voice = VOICES.get(lang, 'nova')
 
     response = requests.post(
-        f'https://api.elevenlabs.io/v1/text-to-speech/{voice_id}',
+        'https://api.openai.com/v1/audio/speech',
         headers={
-            'xi-api-key': ELEVENLABS_API_KEY,
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
             'Content-Type': 'application/json'
         },
         json={
-            'text': text,
-            'model_id': 'eleven_multilingual_v2',
-            'voice_settings': {
-                'stability': 0.4,
-                'similarity_boost': 0.75,
-                'style': 0.5,
-                'use_speaker_boost': True
-            }
+            'model': 'tts-1',
+            'input': text,
+            'voice': voice,
+            'speed': 1.1
         }
     )
 
