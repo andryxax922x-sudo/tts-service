@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import uuid
 import json
+import sys
+os.environ['PYTHONUNBUFFERED'] = '1'
 
 app = Flask(__name__)
 
