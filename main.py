@@ -10,7 +10,6 @@ import json
 app = Flask(__name__)
 
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-PEXELS_API_KEY = os.environ.get('PEXELS_API_KEY')
 
 VOICES = {
     'ru': 'nova',
@@ -34,23 +33,29 @@ def generate_tts(text, lang='ru'):
     )
     return response.content if response.status_code == 200 else None
 
-def search_pexels_video(query):
-    print(f"Searching Pexels for: {query}")
-    response = requests.get(
-        'https://api.pexels.com/videos/search',
-        headers={'Authorization': PEXELS_API_KEY},
-        params={'query': query, 'per_page': 3, 'orientation': 'portrait'}
-    )
-    print(f"Pexels status: {response.status_code}")
-    if response.status_code == 200:
-        videos = response.json().get('videos', [])
-        print(f"Pexels videos found: {len(videos)}")
-        if videos:
-            files = videos[0].get('video_files', [])
-            files_sorted = sorted(files, key=lambda x: x.get('width', 0))
-            for f in files_sorted:
-                if f.get('width', 0) >= 360:
-                    return f.get('link')
+def download_trailer(film_title, tmpdir, index):
+    query = f"{film_title} official trailer"
+    output_path = os.path.join(tmpdir, f'trailer_{index}.mp4')
+    
+    result = subprocess.run([
+        'yt-dlp',
+        f'ytsearch1:{query}',
+        '--format', 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]',
+        '--merge-output-format', 'mp4',
+        '--download-sections', '*0:00-00:20',
+        '--no-playlist',
+        '--output', output_path,
+        '--no-warnings',
+        '--quiet'
+    ], capture_output=True, text=True, timeout=60)
+    
+    print(f"yt-dlp for '{film_title}': returncode={result.returncode}")
+    if result.stderr:
+        print(f"yt-dlp stderr: {result.stderr[:200]}")
+    
+    if os.path.exists(output_path):
+        print(f"Trailer downloaded: {os.path.getsize(output_path)} bytes")
+        return output_path
     return None
 
 def make_srt(script, audio_path, tmpdir):
@@ -107,69 +112,54 @@ def tts():
 def video():
     data = request.json
     script = data.get('script', '')
-    films = data.get('films', ['cinema', 'movie', 'film'])
+    films = data.get('films', [])
     lang = data.get('lang', 'ru')
 
     print(f"Video request: lang={lang}, films={films}")
-    print(f"Script: {script[:100]}")
 
     tmpdir = tempfile.mkdtemp()
     job_id = str(uuid.uuid4())[:8]
 
     # Генерируем голос
-    print("Generating TTS...")
     audio_data = generate_tts(script, lang)
     if not audio_data:
-        print("TTS failed!")
         return jsonify({'error': 'TTS failed'}), 500
 
     audio_path = os.path.join(tmpdir, 'voice.mp3')
     with open(audio_path, 'wb') as f:
         f.write(audio_data)
-    print(f"Audio saved: {len(audio_data)} bytes")
 
     # Генерируем субтитры
     srt_path = make_srt(script, audio_path, tmpdir)
-    print(f"SRT created: {srt_path}")
 
-    # Скачиваем видео с Pexels
+    # Скачиваем трейлеры
     video_paths = []
-    queries = [films[0] if films else 'cinema', 'movie theater', 'popcorn cinema']
-
-    for i, query in enumerate(queries[:3]):
-        url = search_pexels_video(query)
-        if url:
-            print(f"Downloading clip {i}: {url[:60]}")
-            r = requests.get(url, timeout=30)
-            if r.status_code == 200:
-                vpath = os.path.join(tmpdir, f'clip_{i}.mp4')
-                with open(vpath, 'wb') as f:
-                    f.write(r.content)
-                video_paths.append(vpath)
-                print(f"Clip {i} saved: {len(r.content)} bytes")
-
-    print(f"Total clips downloaded: {len(video_paths)}")
+    for i, film in enumerate(films[:3]):
+        path = download_trailer(film, tmpdir, i)
+        if path:
+            video_paths.append(path)
 
     if not video_paths:
-        return jsonify({'error': 'No videos found'}), 500
+        return jsonify({'error': 'No trailers downloaded'}), 500
 
-    # Список клипов для FFmpeg
+    print(f"Total trailers: {len(video_paths)}")
+
+    # Список для FFmpeg
     list_path = os.path.join(tmpdir, 'list.txt')
     with open(list_path, 'w') as f:
         for vp in video_paths:
             f.write(f"file '{vp}'\n")
 
-    # Склеиваем клипы + масштабируем
+    # Склеиваем + масштабируем в вертикальный формат
     concat_path = os.path.join(tmpdir, 'concat.mp4')
     result1 = subprocess.run([
         'ffmpeg', '-f', 'concat', '-safe', '0',
         '-i', list_path,
-        '-vf', 'scale=720:1280,setsar=1',
+        '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-an', '-y', concat_path
     ], capture_output=True, text=True)
-    print("CONCAT STDERR:", result1.stderr[-500:])
-    print("CONCAT exists:", os.path.exists(concat_path))
+    print("CONCAT:", result1.stderr[-300:])
 
     # Накладываем голос + субтитры
     output_path = os.path.join(tmpdir, f'output_{job_id}.mp4')
@@ -182,82 +172,19 @@ def video():
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-c:a', 'aac', '-shortest', '-y', output_path
     ], capture_output=True, text=True)
-    print("OUTPUT STDERR:", result2.stderr[-500:])
-    print("OUTPUT exists:", os.path.exists(output_path))
-    if os.path.exists(output_path):
-        print("OUTPUT size:", os.path.getsize(output_path))
-    if not os.path.exists(output_path):
-        print("Output file not created!")
+    print("OUTPUT:", result2.stderr[-300:])
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
         return jsonify({'error': 'Video generation failed'}), 500
 
-    print(f"Video ready: {os.path.getsize(output_path)} bytes")
+    print(f"Done: {os.path.getsize(output_path)} bytes")
     return send_file(output_path, mimetype='video/mp4',
                      as_attachment=True, download_name='video.mp4')
 
-@app.route('/test', methods=['GET'])
-def test():
-    results = {}
-    
-    # Проверяем переменные
-    results['openai_key'] = 'SET' if OPENAI_API_KEY else 'NOT SET'
-    results['pexels_key'] = 'SET' if PEXELS_API_KEY else 'NOT SET'
-    
-    # Проверяем FFmpeg
-    r = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-    results['ffmpeg'] = r.stdout[:50] if r.returncode == 0 else 'NOT FOUND'
-    
-    # Проверяем Pexels
-    pr = requests.get(
-        'https://api.pexels.com/videos/search',
-        headers={'Authorization': PEXELS_API_KEY or ''},
-        params={'query': 'cinema', 'per_page': 1}
-    )
-    results['pexels_test'] = f"status={pr.status_code}"
-    
-    return jsonify(results)
-@app.route('/test2', methods=['GET'])
-def test2():
-    import traceback
-    results = {}
-    tmpdir = tempfile.mkdtemp()
-    
-    try:
-        # Тест TTS
-        audio_data = generate_tts('Привет это тест', 'ru')
-        results['tts'] = f"OK, {len(audio_data)} bytes" if audio_data else "FAILED"
-        
-        if audio_data:
-            audio_path = os.path.join(tmpdir, 'voice.mp3')
-            with open(audio_path, 'wb') as f:
-                f.write(audio_data)
-            
-            # Тест Pexels
-            url = search_pexels_video('cinema')
-            results['pexels_url'] = url[:80] if url else "NOT FOUND"
-            
-            if url:
-                r = requests.get(url, timeout=30)
-                results['clip_download'] = f"OK, {len(r.content)} bytes" if r.status_code == 200 else f"FAILED {r.status_code}"
-                
-                if r.status_code == 200:
-                    clip_path = os.path.join(tmpdir, 'clip.mp4')
-                    with open(clip_path, 'wb') as f:
-                        f.write(r.content)
-                    
-                    # Тест FFmpeg
-                    out_path = os.path.join(tmpdir, 'out.mp4')
-                    res = subprocess.run([
-                        'ffmpeg', '-i', clip_path,
-                        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
-                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
-                        '-an', '-t', '5', '-y', out_path
-                    ], capture_output=True, text=True)
-                    results['ffmpeg_test'] = f"OK, {os.path.getsize(out_path)} bytes" if os.path.exists(out_path) else f"FAILED: {res.stderr[-300:]}"
-    except Exception as e:
-        results['exception'] = traceback.format_exc()
-    
-    return jsonify(results)
-    
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok'})
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
