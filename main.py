@@ -6,18 +6,9 @@ import subprocess
 import tempfile
 import uuid
 import json
-import sys
-os.environ['PYTHONUNBUFFERED'] = '1'
-
-app = Flask(__name__)
-
 import traceback
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-    print("UNHANDLED EXCEPTION:")
-    print(traceback.format_exc())
-    return jsonify({'error': str(e)}), 500
+app = Flask(__name__)
 
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 
@@ -25,6 +16,12 @@ VOICES = {
     'ru': 'nova',
     'uk': 'shimmer'
 }
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    print("UNHANDLED EXCEPTION:")
+    print(traceback.format_exc())
+    return jsonify({'error': str(e)}), 500
 
 def generate_tts(text, lang='ru'):
     voice = VOICES.get(lang, 'nova')
@@ -52,6 +49,7 @@ def download_poster(poster_path, tmpdir, index):
             f.write(r.content)
         print(f"Poster {index} downloaded: {len(r.content)} bytes")
         return img_path
+    print(f"Poster {index} failed: {r.status_code}")
     return None
 
 def make_srt(script, audio_path, tmpdir):
@@ -111,12 +109,18 @@ def video():
     posters = data.get('posters', [])
     lang = data.get('lang', 'ru')
 
+    # Обрабатываем posters — может прийти строкой или массивом
+    if isinstance(posters, str):
+        posters = [p.strip() for p in posters.split(',') if p.strip()]
+
     print(f"Video request: lang={lang}, posters={posters}")
+    print(f"Script: {script[:80]}")
 
     tmpdir = tempfile.mkdtemp()
     job_id = str(uuid.uuid4())[:8]
 
     # Генерируем голос
+    print("Generating TTS...")
     audio_data = generate_tts(script, lang)
     if not audio_data:
         return jsonify({'error': 'TTS failed'}), 500
@@ -124,10 +128,12 @@ def video():
     audio_path = os.path.join(tmpdir, 'voice.mp3')
     with open(audio_path, 'wb') as f:
         f.write(audio_data)
+    print(f"Audio: {len(audio_data)} bytes")
 
     # Генерируем субтитры
     srt_path, duration = make_srt(script, audio_path, tmpdir)
     time_per_poster = duration / max(len(posters), 1)
+    print(f"Duration: {duration}s, per poster: {time_per_poster}s")
 
     # Скачиваем постеры
     poster_paths = []
@@ -136,6 +142,8 @@ def video():
         if path:
             poster_paths.append(path)
 
+    print(f"Posters downloaded: {len(poster_paths)}")
+
     if not poster_paths:
         return jsonify({'error': 'No posters downloaded'}), 500
 
@@ -143,7 +151,7 @@ def video():
     clip_paths = []
     for i, poster_path in enumerate(poster_paths):
         clip_path = os.path.join(tmpdir, f'clip_{i}.mp4')
-        subprocess.run([
+        r = subprocess.run([
             'ffmpeg',
             '-loop', '1', '-i', poster_path,
             '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1',
@@ -154,11 +162,14 @@ def video():
         ], capture_output=True, text=True)
         if os.path.exists(clip_path):
             clip_paths.append(clip_path)
+            print(f"Clip {i}: {os.path.getsize(clip_path)} bytes")
+        else:
+            print(f"Clip {i} failed: {r.stderr[-200:]}")
 
     if not clip_paths:
         return jsonify({'error': 'Clip generation failed'}), 500
 
-    # Список клипов для FFmpeg
+    # Список клипов
     list_path = os.path.join(tmpdir, 'list.txt')
     with open(list_path, 'w') as f:
         for cp in clip_paths:
@@ -166,17 +177,20 @@ def video():
 
     # Склеиваем клипы
     concat_path = os.path.join(tmpdir, 'concat.mp4')
-    result1 = subprocess.run([
+    r1 = subprocess.run([
         'ffmpeg', '-f', 'concat', '-safe', '0',
         '-i', list_path,
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-an', '-y', concat_path
     ], capture_output=True, text=True)
-    print("CONCAT:", result1.stderr[-200:])
+    print(f"Concat exists: {os.path.exists(concat_path)}")
+    if not os.path.exists(concat_path):
+        print(f"Concat error: {r1.stderr[-300:]}")
+        return jsonify({'error': 'Concat failed'}), 500
 
     # Накладываем голос + субтитры
     output_path = os.path.join(tmpdir, f'output_{job_id}.mp4')
-    result2 = subprocess.run([
+    r2 = subprocess.run([
         'ffmpeg',
         '-i', concat_path,
         '-i', audio_path,
@@ -185,12 +199,13 @@ def video():
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-c:a', 'aac', '-shortest', '-y', output_path
     ], capture_output=True, text=True)
-    print("OUTPUT:", result2.stderr[-200:])
+    print(f"Output exists: {os.path.exists(output_path)}")
+    if os.path.exists(output_path):
+        print(f"Output size: {os.path.getsize(output_path)}")
+    else:
+        print(f"Output error: {r2.stderr[-300:]}")
+        return jsonify({'error': 'Final render failed'}), 500
 
-    if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
-        return jsonify({'error': 'Video generation failed'}), 500
-
-    print(f"Done: {os.path.getsize(output_path)} bytes")
     return send_file(output_path, mimetype='video/mp4',
                      as_attachment=True, download_name='video.mp4')
 
