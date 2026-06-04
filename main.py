@@ -159,16 +159,17 @@ def video():
         for vp in video_paths:
             f.write(f"file '{vp}'\n")
 
-    # Склеиваем клипы
+    # Склеиваем клипы + масштабируем
     concat_path = os.path.join(tmpdir, 'concat.mp4')
     result1 = subprocess.run([
         'ffmpeg', '-f', 'concat', '-safe', '0',
         '-i', list_path,
-        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
+        '-vf', 'scale=720:1280,setsar=1',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-an', '-y', concat_path
     ], capture_output=True, text=True)
-    print("CONCAT STDERR:", result1.stderr[-800:])
+    print("CONCAT STDERR:", result1.stderr[-500:])
+    print("CONCAT exists:", os.path.exists(concat_path))
 
     # Накладываем голос + субтитры
     output_path = os.path.join(tmpdir, f'output_{job_id}.mp4')
@@ -177,12 +178,14 @@ def video():
         '-i', concat_path,
         '-i', audio_path,
         '-map', '0:v', '-map', '1:a',
-        '-vf', f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=60'",
+        '-vf', f"subtitles='{srt_path}':force_style='FontName=Arial,FontSize=14,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=40'",
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-c:a', 'aac', '-shortest', '-y', output_path
     ], capture_output=True, text=True)
-    print("OUTPUT STDERR:", result2.stderr[-800:])
-
+    print("OUTPUT STDERR:", result2.stderr[-500:])
+    print("OUTPUT exists:", os.path.exists(output_path))
+    if os.path.exists(output_path):
+        print("OUTPUT size:", os.path.getsize(output_path))
     if not os.path.exists(output_path):
         print("Output file not created!")
         return jsonify({'error': 'Video generation failed'}), 500
