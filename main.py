@@ -33,29 +33,15 @@ def generate_tts(text, lang='ru'):
     )
     return response.content if response.status_code == 200 else None
 
-def download_trailer(film_title, tmpdir, index):
-    query = f"{film_title} official trailer"
-    output_path = os.path.join(tmpdir, f'trailer_{index}.mp4')
-    
-    result = subprocess.run([
-        'yt-dlp',
-        f'ytsearch1:{query}',
-        '--format', 'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]',
-        '--merge-output-format', 'mp4',
-        '--download-sections', '*0:00-00:20',
-        '--no-playlist',
-        '--output', output_path,
-        '--no-warnings',
-        '--quiet'
-    ], capture_output=True, text=True, timeout=60)
-    
-    print(f"yt-dlp for '{film_title}': returncode={result.returncode}")
-    if result.stderr:
-        print(f"yt-dlp stderr: {result.stderr[:200]}")
-    
-    if os.path.exists(output_path):
-        print(f"Trailer downloaded: {os.path.getsize(output_path)} bytes")
-        return output_path
+def download_poster(poster_path, tmpdir, index):
+    url = f"https://image.tmdb.org/t/p/w500{poster_path}"
+    r = requests.get(url, timeout=15)
+    if r.status_code == 200:
+        img_path = os.path.join(tmpdir, f'poster_{index}.jpg')
+        with open(img_path, 'wb') as f:
+            f.write(r.content)
+        print(f"Poster {index} downloaded: {len(r.content)} bytes")
+        return img_path
     return None
 
 def make_srt(script, audio_path, tmpdir):
@@ -75,7 +61,7 @@ def make_srt(script, audio_path, tmpdir):
     chunks = []
     chunk_size = 7
     for i in range(0, len(words), chunk_size):
-        chunks.append(' '.join(words[i:i+chunk_size]))
+        chunks.append(' '.join(words[i:i + chunk_size]))
 
     srt_path = os.path.join(tmpdir, 'subs.srt')
     time_per_chunk = duration / max(len(chunks), 1)
@@ -84,11 +70,11 @@ def make_srt(script, audio_path, tmpdir):
         for i, chunk in enumerate(chunks):
             start = i * time_per_chunk
             end = (i + 1) * time_per_chunk
-            f.write(f"{i+1}\n")
+            f.write(f"{i + 1}\n")
             f.write(f"{format_time(start)} --> {format_time(end)}\n")
             f.write(f"{chunk}\n\n")
 
-    return srt_path
+    return srt_path, duration
 
 def format_time(seconds):
     h = int(seconds // 3600)
@@ -112,10 +98,10 @@ def tts():
 def video():
     data = request.json
     script = data.get('script', '')
-    films = data.get('films', [])
+    posters = data.get('posters', [])
     lang = data.get('lang', 'ru')
 
-    print(f"Video request: lang={lang}, films={films}")
+    print(f"Video request: lang={lang}, posters={posters}")
 
     tmpdir = tempfile.mkdtemp()
     job_id = str(uuid.uuid4())[:8]
@@ -130,36 +116,53 @@ def video():
         f.write(audio_data)
 
     # Генерируем субтитры
-    srt_path = make_srt(script, audio_path, tmpdir)
+    srt_path, duration = make_srt(script, audio_path, tmpdir)
+    time_per_poster = duration / max(len(posters), 1)
 
-    # Скачиваем трейлеры
-    video_paths = []
-    for i, film in enumerate(films[:3]):
-        path = download_trailer(film, tmpdir, i)
+    # Скачиваем постеры
+    poster_paths = []
+    for i, poster in enumerate(posters[:3]):
+        path = download_poster(poster, tmpdir, i)
         if path:
-            video_paths.append(path)
+            poster_paths.append(path)
 
-    if not video_paths:
-        return jsonify({'error': 'No trailers downloaded'}), 500
+    if not poster_paths:
+        return jsonify({'error': 'No posters downloaded'}), 500
 
-    print(f"Total trailers: {len(video_paths)}")
+    # Конвертируем постеры в видеоклипы
+    clip_paths = []
+    for i, poster_path in enumerate(poster_paths):
+        clip_path = os.path.join(tmpdir, f'clip_{i}.mp4')
+        subprocess.run([
+            'ffmpeg',
+            '-loop', '1', '-i', poster_path,
+            '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1',
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+            '-t', str(time_per_poster),
+            '-pix_fmt', 'yuv420p',
+            '-an', '-y', clip_path
+        ], capture_output=True, text=True)
+        if os.path.exists(clip_path):
+            clip_paths.append(clip_path)
 
-    # Список для FFmpeg
+    if not clip_paths:
+        return jsonify({'error': 'Clip generation failed'}), 500
+
+    # Список клипов для FFmpeg
     list_path = os.path.join(tmpdir, 'list.txt')
     with open(list_path, 'w') as f:
-        for vp in video_paths:
-            f.write(f"file '{vp}'\n")
+        for cp in clip_paths:
+            f.write(f"file '{cp}'\n")
 
-    # Склеиваем + масштабируем в вертикальный формат
+    # Склеиваем клипы
     concat_path = os.path.join(tmpdir, 'concat.mp4')
     result1 = subprocess.run([
         'ffmpeg', '-f', 'concat', '-safe', '0',
         '-i', list_path,
-        '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-an', '-y', concat_path
     ], capture_output=True, text=True)
-    print("CONCAT:", result1.stderr[-300:])
+    print("CONCAT:", result1.stderr[-200:])
 
     # Накладываем голос + субтитры
     output_path = os.path.join(tmpdir, f'output_{job_id}.mp4')
@@ -172,7 +175,7 @@ def video():
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-c:a', 'aac', '-shortest', '-y', output_path
     ], capture_output=True, text=True)
-    print("OUTPUT:", result2.stderr[-300:])
+    print("OUTPUT:", result2.stderr[-200:])
 
     if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
         return jsonify({'error': 'Video generation failed'}), 500
