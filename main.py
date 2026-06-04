@@ -6,7 +6,10 @@ import os
 app = Flask(__name__)
 
 ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')
-VOICE_ID = 'pNInz6obpgDQGcFmaJgB'
+VOICES = {
+    'ru': 'm0OQuJtWCw1V23P0pQmG',
+    'uk': 'l0FRhtyn0AKRYadUAdgv'
+}
 
 @app.route('/tts', methods=['POST'])
 def tts():
