@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import uuid
+import json
 
 app = Flask(__name__)
 
@@ -34,13 +35,16 @@ def generate_tts(text, lang='ru'):
     return response.content if response.status_code == 200 else None
 
 def search_pexels_video(query):
+    print(f"Searching Pexels for: {query}")
     response = requests.get(
         'https://api.pexels.com/videos/search',
         headers={'Authorization': PEXELS_API_KEY},
         params={'query': query, 'per_page': 3, 'orientation': 'portrait'}
     )
+    print(f"Pexels status: {response.status_code}")
     if response.status_code == 200:
         videos = response.json().get('videos', [])
+        print(f"Pexels videos found: {len(videos)}")
         if videos:
             files = videos[0].get('video_files', [])
             files_sorted = sorted(files, key=lambda x: x.get('width', 0))
@@ -50,13 +54,11 @@ def search_pexels_video(query):
     return None
 
 def make_srt(script, audio_path, tmpdir):
-    # Получаем длительность аудио
     result = subprocess.run([
         'ffprobe', '-v', 'quiet', '-print_format', 'json',
         '-show_format', audio_path
     ], capture_output=True, text=True)
-    
-    import json
+
     duration = 30.0
     try:
         info = json.loads(result.stdout)
@@ -64,17 +66,15 @@ def make_srt(script, audio_path, tmpdir):
     except:
         pass
 
-    # Разбиваем текст на строки по ~7 слов
     words = script.split()
     chunks = []
     chunk_size = 7
     for i in range(0, len(words), chunk_size):
         chunks.append(' '.join(words[i:i+chunk_size]))
 
-    # Создаём SRT файл
     srt_path = os.path.join(tmpdir, 'subs.srt')
     time_per_chunk = duration / max(len(chunks), 1)
-    
+
     with open(srt_path, 'w', encoding='utf-8') as f:
         for i, chunk in enumerate(chunks):
             start = i * time_per_chunk
@@ -82,7 +82,7 @@ def make_srt(script, audio_path, tmpdir):
             f.write(f"{i+1}\n")
             f.write(f"{format_time(start)} --> {format_time(end)}\n")
             f.write(f"{chunk}\n\n")
-    
+
     return srt_path
 
 def format_time(seconds):
@@ -110,20 +110,27 @@ def video():
     films = data.get('films', ['cinema', 'movie', 'film'])
     lang = data.get('lang', 'ru')
 
+    print(f"Video request: lang={lang}, films={films}")
+    print(f"Script: {script[:100]}")
+
     tmpdir = tempfile.mkdtemp()
     job_id = str(uuid.uuid4())[:8]
 
     # Генерируем голос
+    print("Generating TTS...")
     audio_data = generate_tts(script, lang)
     if not audio_data:
+        print("TTS failed!")
         return jsonify({'error': 'TTS failed'}), 500
 
     audio_path = os.path.join(tmpdir, 'voice.mp3')
     with open(audio_path, 'wb') as f:
         f.write(audio_data)
+    print(f"Audio saved: {len(audio_data)} bytes")
 
     # Генерируем субтитры
     srt_path = make_srt(script, audio_path, tmpdir)
+    print(f"SRT created: {srt_path}")
 
     # Скачиваем видео с Pexels
     video_paths = []
@@ -132,12 +139,16 @@ def video():
     for i, query in enumerate(queries[:3]):
         url = search_pexels_video(query)
         if url:
+            print(f"Downloading clip {i}: {url[:60]}")
             r = requests.get(url, timeout=30)
             if r.status_code == 200:
                 vpath = os.path.join(tmpdir, f'clip_{i}.mp4')
                 with open(vpath, 'wb') as f:
                     f.write(r.content)
                 video_paths.append(vpath)
+                print(f"Clip {i} saved: {len(r.content)} bytes")
+
+    print(f"Total clips downloaded: {len(video_paths)}")
 
     if not video_paths:
         return jsonify({'error': 'No videos found'}), 500
@@ -150,17 +161,18 @@ def video():
 
     # Склеиваем клипы
     concat_path = os.path.join(tmpdir, 'concat.mp4')
-    subprocess.run([
+    result1 = subprocess.run([
         'ffmpeg', '-f', 'concat', '-safe', '0',
         '-i', list_path,
         '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-an', '-y', concat_path
-    ], capture_output=True)
+    ], capture_output=True, text=True)
+    print("CONCAT STDERR:", result1.stderr[-800:])
 
     # Накладываем голос + субтитры
     output_path = os.path.join(tmpdir, f'output_{job_id}.mp4')
-    subprocess.run([
+    result2 = subprocess.run([
         'ffmpeg',
         '-i', concat_path,
         '-i', audio_path,
@@ -168,11 +180,14 @@ def video():
         '-vf', f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=60'",
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
         '-c:a', 'aac', '-shortest', '-y', output_path
-    ], capture_output=True)
+    ], capture_output=True, text=True)
+    print("OUTPUT STDERR:", result2.stderr[-800:])
 
     if not os.path.exists(output_path):
+        print("Output file not created!")
         return jsonify({'error': 'Video generation failed'}), 500
 
+    print(f"Video ready: {os.path.getsize(output_path)} bytes")
     return send_file(output_path, mimetype='video/mp4',
                      as_attachment=True, download_name='video.mp4')
 
