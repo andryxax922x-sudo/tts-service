@@ -212,7 +212,49 @@ def test():
     results['pexels_test'] = f"status={pr.status_code}"
     
     return jsonify(results)
-
+@app.route('/test2', methods=['GET'])
+def test2():
+    import traceback
+    results = {}
+    tmpdir = tempfile.mkdtemp()
+    
+    try:
+        # Тест TTS
+        audio_data = generate_tts('Привет это тест', 'ru')
+        results['tts'] = f"OK, {len(audio_data)} bytes" if audio_data else "FAILED"
+        
+        if audio_data:
+            audio_path = os.path.join(tmpdir, 'voice.mp3')
+            with open(audio_path, 'wb') as f:
+                f.write(audio_data)
+            
+            # Тест Pexels
+            url = search_pexels_video('cinema')
+            results['pexels_url'] = url[:80] if url else "NOT FOUND"
+            
+            if url:
+                r = requests.get(url, timeout=30)
+                results['clip_download'] = f"OK, {len(r.content)} bytes" if r.status_code == 200 else f"FAILED {r.status_code}"
+                
+                if r.status_code == 200:
+                    clip_path = os.path.join(tmpdir, 'clip.mp4')
+                    with open(clip_path, 'wb') as f:
+                        f.write(r.content)
+                    
+                    # Тест FFmpeg
+                    out_path = os.path.join(tmpdir, 'out.mp4')
+                    res = subprocess.run([
+                        'ffmpeg', '-i', clip_path,
+                        '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
+                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+                        '-an', '-t', '5', '-y', out_path
+                    ], capture_output=True, text=True)
+                    results['ffmpeg_test'] = f"OK, {os.path.getsize(out_path)} bytes" if os.path.exists(out_path) else f"FAILED: {res.stderr[-300:]}"
+    except Exception as e:
+        results['exception'] = traceback.format_exc()
+    
+    return jsonify(results)
+    
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
