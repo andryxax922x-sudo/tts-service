@@ -6,6 +6,7 @@ import os
 app = Flask(__name__)
 
 ELEVENLABS_API_KEY = os.environ.get('ELEVENLABS_API_KEY')
+
 VOICES = {
     'ru': 'm0OQuJtWCw1V23P0pQmG',
     'uk': 'l0FRhtyn0AKRYadUAdgv'
@@ -15,12 +16,11 @@ VOICES = {
 def tts():
     data = request.json
     text = data.get('text', '')
-    
-    print(f"API KEY: {ELEVENLABS_API_KEY[:10] if ELEVENLABS_API_KEY else 'NOT SET'}")
-    print(f"Text: {text[:50]}")
-    
+    lang = data.get('lang', 'ru')
+    voice_id = VOICES.get(lang, VOICES['ru'])
+
     response = requests.post(
-        f'https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}',
+        f'https://api.elevenlabs.io/v1/text-to-speech/{voice_id}',
         headers={
             'xi-api-key': ELEVENLABS_API_KEY,
             'Content-Type': 'application/json'
@@ -29,22 +29,21 @@ def tts():
             'text': text,
             'model_id': 'eleven_multilingual_v2',
             'voice_settings': {
-                'stability': 0.5,
-                'similarity_boost': 0.75
+                'stability': 0.4,
+                'similarity_boost': 0.75,
+                'style': 0.5,
+                'use_speaker_boost': True
             }
         }
     )
-    
-    print(f"Status: {response.status_code}")
-    print(f"Response: {response.text[:200]}")
-    
+
     if response.status_code != 200:
         return jsonify({'error': response.text}), 500
-    
+
     audio_buffer = io.BytesIO(response.content)
     audio_buffer.seek(0)
     return send_file(audio_buffer, mimetype='audio/mpeg',
-                     as_attachment=True, download_name='voice.mp3')
+                     as_attachment=True, download_name=f'voice_{lang}.mp3')
 
 @app.route('/health', methods=['GET'])
 def health():
