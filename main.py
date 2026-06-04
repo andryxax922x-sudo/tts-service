@@ -9,6 +9,14 @@ import json
 
 app = Flask(__name__)
 
+import traceback
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    print("UNHANDLED EXCEPTION:")
+    print(traceback.format_exc())
+    return jsonify({'error': str(e)}), 500
+
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 
 VOICES = {
