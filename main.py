@@ -191,9 +191,27 @@ def video():
     return send_file(output_path, mimetype='video/mp4',
                      as_attachment=True, download_name='video.mp4')
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok'})
+@app.route('/test', methods=['GET'])
+def test():
+    results = {}
+    
+    # Проверяем переменные
+    results['openai_key'] = 'SET' if OPENAI_API_KEY else 'NOT SET'
+    results['pexels_key'] = 'SET' if PEXELS_API_KEY else 'NOT SET'
+    
+    # Проверяем FFmpeg
+    r = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+    results['ffmpeg'] = r.stdout[:50] if r.returncode == 0 else 'NOT FOUND'
+    
+    # Проверяем Pexels
+    pr = requests.get(
+        'https://api.pexels.com/videos/search',
+        headers={'Authorization': PEXELS_API_KEY or ''},
+        params={'query': 'cinema', 'per_page': 1}
+    )
+    results['pexels_test'] = f"status={pr.status_code}"
+    
+    return jsonify(results)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
