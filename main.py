@@ -43,12 +43,54 @@ def search_pexels_video(query):
         videos = response.json().get('videos', [])
         if videos:
             files = videos[0].get('video_files', [])
-            # Берём файл с наименьшим разрешением для скорости
             files_sorted = sorted(files, key=lambda x: x.get('width', 0))
             for f in files_sorted:
                 if f.get('width', 0) >= 360:
                     return f.get('link')
     return None
+
+def make_srt(script, audio_path, tmpdir):
+    # Получаем длительность аудио
+    result = subprocess.run([
+        'ffprobe', '-v', 'quiet', '-print_format', 'json',
+        '-show_format', audio_path
+    ], capture_output=True, text=True)
+    
+    import json
+    duration = 30.0
+    try:
+        info = json.loads(result.stdout)
+        duration = float(info['format']['duration'])
+    except:
+        pass
+
+    # Разбиваем текст на строки по ~7 слов
+    words = script.split()
+    chunks = []
+    chunk_size = 7
+    for i in range(0, len(words), chunk_size):
+        chunks.append(' '.join(words[i:i+chunk_size]))
+
+    # Создаём SRT файл
+    srt_path = os.path.join(tmpdir, 'subs.srt')
+    time_per_chunk = duration / max(len(chunks), 1)
+    
+    with open(srt_path, 'w', encoding='utf-8') as f:
+        for i, chunk in enumerate(chunks):
+            start = i * time_per_chunk
+            end = (i + 1) * time_per_chunk
+            f.write(f"{i+1}\n")
+            f.write(f"{format_time(start)} --> {format_time(end)}\n")
+            f.write(f"{chunk}\n\n")
+    
+    return srt_path
+
+def format_time(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 @app.route('/tts', methods=['POST'])
 def tts():
@@ -80,6 +122,9 @@ def video():
     with open(audio_path, 'wb') as f:
         f.write(audio_data)
 
+    # Генерируем субтитры
+    srt_path = make_srt(script, audio_path, tmpdir)
+
     # Скачиваем видео с Pexels
     video_paths = []
     queries = [films[0] if films else 'cinema', 'movie theater', 'popcorn cinema']
@@ -97,7 +142,7 @@ def video():
     if not video_paths:
         return jsonify({'error': 'No videos found'}), 500
 
-    # Создаём файл списка для FFmpeg
+    # Список клипов для FFmpeg
     list_path = os.path.join(tmpdir, 'list.txt')
     with open(list_path, 'w') as f:
         for vp in video_paths:
@@ -113,15 +158,16 @@ def video():
         '-an', '-y', concat_path
     ], capture_output=True)
 
-    # Накладываем голос
+    # Накладываем голос + субтитры
     output_path = os.path.join(tmpdir, f'output_{job_id}.mp4')
     subprocess.run([
         'ffmpeg',
         '-i', concat_path,
         '-i', audio_path,
         '-map', '0:v', '-map', '1:a',
-        '-c:v', 'copy', '-c:a', 'aac',
-        '-shortest', '-y', output_path
+        '-vf', f"subtitles={srt_path}:force_style='FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2,MarginV=60'",
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '28',
+        '-c:a', 'aac', '-shortest', '-y', output_path
     ], capture_output=True)
 
     if not os.path.exists(output_path):
